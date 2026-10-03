@@ -1,7 +1,6 @@
 import json
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,7 +12,7 @@ from core.pea_cloud import make_pea_cloud
 from core.session import Session
 from core.settings import ROOT, load_settings
 from hardware.controller import Busy, Cancelled, Controller, ControllerError, Position, parse_position
-from tests.fakes import FastController
+from tests.fakes import FastController, PositionOnlySerial
 
 
 class StorageTests(unittest.TestCase):
@@ -75,28 +74,25 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.session.count, 0)
 
 
-class FakeSerial:
+class FakeSerial(PositionOnlySerial):
     def __init__(self, responses):
-        self.responses = list(responses)
-        self.writes = []
-
-    def reset_input_buffer(self):
-        pass
+        super().__init__()
+        self.reply = list(responses)
+        self.on_write = lambda: None
 
     def write(self, value):
         self.writes.append(value)
-
-    def readline(self):
-        if self.responses:
-            return self.responses.pop(0)
-        time.sleep(0.001)
-        return b""
+        self.responses.extend(self.reply)
+        self.on_write()
+        return len(value)
 
 
 class ProtocolTests(unittest.TestCase):
     def client(self, responses):
         self.serial = FakeSerial(responses)
-        return Controller("fake", 115200, serial_factory=lambda **kwargs: self.serial)
+        client = Controller("fake", 115200, serial_factory=lambda **kwargs: self.serial)
+        self.addCleanup(client.close)
+        return client
 
     def test_position_units_and_fragmented_serial_response(self):
         self.assertEqual(parse_position(["OK", "POS Z=125.000mm X=-45deg"]), Position(-45, 125))
@@ -118,6 +114,7 @@ class ProtocolTests(unittest.TestCase):
     def test_control_commands_accept_empty_reply_but_pos_still_requires_coordinates(self):
         serial = FakeSerial([])
         client = FastController("fake", 115200, serial_factory=lambda **_: serial)
+        self.addCleanup(client.close)
         for command in ("SMLZ_1355", "SPDZ_40", "SPDX_45", "ACLX_13", "HOME",
                         "XX_+45", "Z_300", "W_100", "STOP"):
             with self.subTest(command=command):
@@ -129,19 +126,12 @@ class ProtocolTests(unittest.TestCase):
         client = self.client([])
         client.RESPONSE_TIMEOUT_S = 0.2
         client.RESPONSE_QUIET_S = 0.01
-        start = time.monotonic()
-        sent_ack = sent_position = False
-        def received():
-            nonlocal sent_ack, sent_position
-            if not sent_ack:
-                sent_ack = True
-                return b"OK\n"
-            if not sent_position and time.monotonic() - start > 0.04:
-                sent_position = True
-                return b"POS Z=600 X=135\n"
-            time.sleep(0.001)
-            return b""
-        self.serial.readline = received
+        def reply():
+            self.serial.responses.append(b"OK\n")
+            timer = threading.Timer(0.04, self.serial.responses.append, args=(b"POS Z=600 X=135\n",))
+            self.addCleanup(timer.join)
+            timer.start()
+        self.serial.on_write = reply
         self.assertEqual(client.position(), Position(135, 600))
 
     def test_stop_event_prevents_serial_motion_write(self):
@@ -155,10 +145,11 @@ class ProtocolTests(unittest.TestCase):
     def test_stop_can_interrupt_serial_response_wait(self):
         cancel = threading.Event()
         client = self.client([])
-        def received():
-            cancel.set()
-            return b""
-        self.serial.readline = received
+        def written():
+            timer = threading.Timer(0.04, cancel.set)
+            self.addCleanup(timer.join)
+            timer.start()
+        self.serial.on_write = written
         with self.assertRaises(Cancelled):
             client.command("XX_+45", cancel)
         self.assertEqual(self.serial.writes, [b"XX_+45\n"])

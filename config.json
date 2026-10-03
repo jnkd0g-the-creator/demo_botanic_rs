@@ -8,7 +8,7 @@
   "z_speed": 40,
   "x_acceleration": 13,
   "settle_s": 0.7,
-  "poll_s": 0.1,
+  "poll_s": 1.5,
   "position_tolerance": 1.0,
   "home_timeout_s": 120,
   "move_timeout_s": 90,

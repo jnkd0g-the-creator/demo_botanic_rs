@@ -19,7 +19,7 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QPushButton
 
 from hardware.workers import CameraWorker, RigWorker
-from tests.fakes import FakeCameras, FakeController, FastController, PositionOnlySerial
+from tests.fakes import BlockedSerial, FakeCameras, FakeController, FastController
 from ui.main_window import MainWindow
 from ui.theme import apply_theme
 
@@ -36,8 +36,9 @@ class UiFlowTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.output = Path(self.temp.name)
         self.controller = FakeController()
-        self.serial = PositionOnlySerial(self.controller)
+        self.serial = BlockedSerial(self.controller)
         self.client = FastController("fake", 115200, serial_factory=lambda **_: self.serial)
+        self.addCleanup(self.client.close)
         self.connect_count = 0
         self.devices = []
         self.block_capture = False
@@ -89,6 +90,7 @@ class UiFlowTests(unittest.TestCase):
         self.assertTrue(self.controller.closed)
         self.assertTrue(all(device.closed for device in self.devices))
         self.assertNotIn("LED_OFF", self.controller.events)
+        self.assertFalse(self.client._reader.is_alive())
 
     def wait(self, predicate, timeout=5):
         deadline = time.monotonic() + timeout
@@ -175,6 +177,43 @@ class UiFlowTests(unittest.TestCase):
         self.wait(lambda: not self.window.rig.isRunning() and not self.window.camera.isRunning())
         self.assertIn("STOP", self.controller.events)
         self.assertNotIn("XX_+45", self.controller.events)
+
+    def test_stop_interrupts_blocked_write_and_opens_report(self):
+        self.serial.block_command = "HOME"
+        self.window.start_button.click()
+        self.wait(self.serial.entered.is_set)
+        self.window.stop_button.click()
+        self.wait(self.report_visible, timeout=1)
+        self.assertTrue(self.serial.write_cancelled.is_set())
+        self.assertIn("STOP", self.controller.events)
+        self.assertNotIn("HOME", self.controller.events)
+        self.assertNotIn("XX_+45", self.controller.events)
+        self.assertIn("Остановлено пользователем", self.window.report.session_summary.text())
+        self.assertFalse(self.serial.closed)
+
+    def test_window_close_interrupts_blocked_flush(self):
+        self.serial.block_command = "HOME"
+        self.serial.block_phase = "flush"
+        self.window.start_button.click()
+        self.wait(self.serial.entered.is_set)
+        self.window.close()
+        self.wait(lambda: not self.window.rig.isRunning() and not self.window.camera.isRunning(), timeout=1)
+        self.assertGreater(self.serial.output_resets, 0)
+        self.assertIn("STOP", self.controller.events)
+        self.assertNotIn("XX_+45", self.controller.events)
+
+    def test_queued_start_stop_interrupts_a_blocked_idle_position_poll(self):
+        self.serial.block_command = "POS"
+        self.wait(self.serial.entered.is_set)
+        self.window.start_button.click()
+        self.window.stop_button.click()
+        self.serial.block_command = ""
+        self.wait(self.report_visible, timeout=1)
+        self.assertTrue(self.serial.write_cancelled.is_set())
+        self.assertIn("STOP", self.controller.events)
+        self.assertNotIn("XX_+45", self.controller.events)
+        self.assertIn("Остановлено пользователем", self.window.report.session_summary.text())
+        self.assertEqual(self.connect_count, 1)
 
 
 if __name__ == "__main__":

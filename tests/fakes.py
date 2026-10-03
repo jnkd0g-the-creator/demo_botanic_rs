@@ -57,6 +57,7 @@ class FastController(Controller):
 
     RESPONSE_TIMEOUT_S = 0.03
     RESPONSE_QUIET_S = 0.003
+    POSITION_INTERVAL_S = 0.005
 
 
 class PositionOnlySerial:
@@ -66,17 +67,23 @@ class PositionOnlySerial:
         self.plant = plant if plant is not None else FakeController()
         self.responses = deque()
         self.writes = []
+        self.write_times = []
+        self.flushes = 0
+        self.output_resets = 0
         self.closed = False
         self.drop_positions = 0
 
     def reset_input_buffer(self):
-        self.responses.clear()
+        raise AssertionError("Входящие данные нельзя сбрасывать между командами")
 
     def write(self, data):
         if self.closed:
             raise OSError("Serial port is closed")
         self.writes.append(data)
+        self.write_times.append(time.monotonic())
         command = data.decode("ascii").strip()
+        if not command:
+            return len(data)
         if command == "POS":
             if self.drop_positions:
                 self.drop_positions -= 1
@@ -87,6 +94,18 @@ class PositionOnlySerial:
             self.plant.command(command)
         return len(data)
 
+    def flush(self):
+        self.flushes += 1
+
+    def cancel_read(self):
+        pass
+
+    def cancel_write(self):
+        pass
+
+    def reset_output_buffer(self):
+        self.output_resets += 1
+
     def readline(self):
         if self.responses:
             return self.responses.popleft()
@@ -96,6 +115,48 @@ class PositionOnlySerial:
     def close(self):
         self.closed = True
         self.plant.close()
+
+
+class BlockedSerial(PositionOnlySerial):
+    """Управляемая задержка write/flush; отмена будит заблокированный драйвер."""
+
+    def __init__(self, plant=None):
+        super().__init__(plant)
+        self.block_command = ""
+        self.block_phase = "write"
+        self.entered = Event()
+        self.release = Event()
+        self.write_cancelled = Event()
+        self.on_write = lambda data: None
+
+    def write(self, data):
+        if self.block_command and data.decode().strip() == self.block_command and self.block_phase == "write":
+            self.entered.set()
+            if not self.release.wait(5):
+                raise TimeoutError("Test did not release write")
+            if self.write_cancelled.is_set() or self.closed:
+                return 0
+        self.on_write(data)
+        return super().write(data)
+
+    def flush(self):
+        if self.block_command and self.writes[-1].decode().strip() == self.block_command and self.block_phase == "flush":
+            self.entered.set()
+            if not self.release.wait(5):
+                raise TimeoutError("Test did not release flush")
+        super().flush()
+
+    def cancel_write(self):
+        self.write_cancelled.set()
+        self.release.set()
+
+    def reset_output_buffer(self):
+        super().reset_output_buffer()
+        self.release.set()
+
+    def close(self):
+        super().close()
+        self.release.set()
 
 
 class FakeCameras:

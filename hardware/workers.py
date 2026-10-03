@@ -12,7 +12,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from core.scan import Outcome, Scan
 from core.settings import ROOT, Settings
 from hardware.cameras import DahengPair
-from hardware.controller import Busy, Cancelled, Controller
+from hardware.controller import Busy, Cancelled, Controller, TransportError
 
 log = logging.getLogger(__name__)
 
@@ -140,15 +140,19 @@ class RigWorker(QThread):
         self.camera = camera
         self.shutdown = threading.Event()
         self.jobs = queue.Queue(maxsize=1)
+        self.poll_cancel = threading.Event()
         self.active_job = None
         self.output = output if output is not None else ROOT / "captures"
         self.connector = connector or Controller.connect
 
     def submit(self, job: Job):
         self.jobs.put_nowait(job)
+        # Новый проход не должен ждать заблокированной фоновой записи POS.
+        self.poll_cancel.set()
 
     def stop_worker(self):
         self.shutdown.set()
+        self.poll_cancel.set()
         if self.active_job:
             self.active_job.cancel.set()
 
@@ -168,6 +172,9 @@ class RigWorker(QThread):
         position_failures = 0
         try:
             while not self.shutdown.is_set():
+                self.poll_cancel.clear()
+                if self.shutdown.is_set():
+                    break
                 if client is None:
                     self._fail_pending("Потеряна связь с контроллером")
                     try:
@@ -199,22 +206,23 @@ class RigWorker(QThread):
                     next_poll = 0
                 elif time.monotonic() >= next_poll:
                     try:
-                        self.position.emit(client.position(self.shutdown))
+                        self.position.emit(client.position(self.poll_cancel))
                         if position_failures:
                             self.connection.emit(True, f"Контроллер · {client.port}")
                         position_failures = 0
                     except Cancelled:
-                        break
+                        if self.shutdown.is_set():
+                            break
                     except Busy:
                         # HOME/STOP могут ещё отпускать busy. Сам порт доступен.
                         pass
                     except Exception as exc:
                         position_failures += 1
                         self.connection.emit(False, str(exc))
-                        if position_failures >= 3:
+                        if isinstance(exc, TransportError) or position_failures >= 3:
                             client.close()
                             client = None
-                    next_poll = time.monotonic() + 1
+                    next_poll = time.monotonic() + self.settings.poll_s
         finally:
             self._fail_pending("Приложение закрывается")
             if client:

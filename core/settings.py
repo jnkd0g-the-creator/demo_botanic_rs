@@ -20,7 +20,7 @@ class Settings:
     z_speed: int = 40
     x_acceleration: int = 13
     settle_s: float = 0.7
-    poll_s: float = 0.1
+    poll_s: float = 1.5
     position_tolerance: float = 1.0
     home_timeout_s: float = 120
     move_timeout_s: float = 90

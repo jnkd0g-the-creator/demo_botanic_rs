@@ -164,6 +164,7 @@ class ScanTests(unittest.TestCase):
     def test_serial_without_command_ack_completes_entire_pass(self):
         serial = PositionOnlySerial(self.controller)
         self.controller = FastController("fake", 115200, serial_factory=lambda **_: serial)
+        self.addCleanup(self.controller.close)
         self.settings = replace(self.settings, move_timeout_s=1, home_timeout_s=1)
         result = self.scan().run(self.cancel)
         self.assertEqual(result.reason, "completed", result.error)
@@ -178,6 +179,7 @@ class ScanTests(unittest.TestCase):
         serial = PositionOnlySerial(self.controller)
         serial.drop_positions = 1
         self.controller = FastController("fake", 115200, serial_factory=lambda **_: serial)
+        self.addCleanup(self.controller.close)
         result = self.scan().run(self.cancel)
         self.assertEqual(result.reason, "error")
         self.assertIn("Нет ответа на POS", result.error)
