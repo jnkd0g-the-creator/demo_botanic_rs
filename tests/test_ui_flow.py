@@ -19,7 +19,7 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QPushButton
 
 from hardware.workers import CameraWorker, RigWorker
-from tests.fakes import FakeCameras, FakeController
+from tests.fakes import FakeCameras, FakeController, FastController, PositionOnlySerial
 from ui.main_window import MainWindow
 from ui.theme import apply_theme
 
@@ -36,6 +36,9 @@ class UiFlowTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.output = Path(self.temp.name)
         self.controller = FakeController()
+        self.serial = PositionOnlySerial(self.controller)
+        self.client = FastController("fake", 115200, serial_factory=lambda **_: self.serial)
+        self.connect_count = 0
         self.devices = []
         self.block_capture = False
         self.fail_camera = False
@@ -60,9 +63,14 @@ class UiFlowTests(unittest.TestCase):
         def camera_worker(settings, parent):
             return CameraWorker(settings, parent, factory=factory)
 
+        def connect(settings, shutdown):
+            self.connect_count += 1
+            self.client.position(shutdown)
+            return self.client
+
         def rig_worker(settings, camera, parent):
             return RigWorker(settings, camera, parent, output=self.output,
-                             connector=lambda *_: self.controller)
+                             connector=connect)
 
         settings = replace(Settings(), poll_s=0.003, settle_s=0, move_timeout_s=2,
                            home_timeout_s=2, capture_timeout_s=5)
@@ -80,6 +88,7 @@ class UiFlowTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(self.controller.closed)
         self.assertTrue(all(device.closed for device in self.devices))
+        self.assertNotIn("LED_OFF", self.controller.events)
 
     def wait(self, predicate, timeout=5):
         deadline = time.monotonic() + timeout
@@ -98,6 +107,8 @@ class UiFlowTests(unittest.TestCase):
         self.window.start_button.click()  # Заблокированный повторный старт не ставит второй цикл.
         self.wait(self.report_visible)
         self.assertEqual(self.controller.events.count("HOME"), 1)
+        self.assertFalse(self.window.report.error_label.text())
+        self.assertEqual(self.controller.white_light, 100)
         self.assertEqual(len(list(self.output.rglob("*.png"))), 10)
         self.assertTrue(any(device.fresh_calls.count(True) == 5 for device in self.devices))
         self.assertEqual(self.window.report.geometry(), self.window.stack.contentsRect())
@@ -143,6 +154,18 @@ class UiFlowTests(unittest.TestCase):
         self.assertEqual(self.controller.events.count("XX_+45"), 1)
         manifest = json.loads(next(self.output.rglob("session.json")).read_text())
         self.assertEqual(manifest["status"], "error")
+        polls = self.serial.writes.count(b"POS\n")
+        self.wait(lambda: self.serial.writes.count(b"POS\n") > polls)
+        self.assertEqual(self.connect_count, 1)
+        self.assertFalse(self.serial.closed)
+        self.assertTrue(self.window.controller_ready)
+
+    def test_one_missed_position_poll_recovers_without_reopening_port(self):
+        self.serial.drop_positions = 1
+        self.wait(lambda: not self.window.controller_ready)
+        self.wait(lambda: self.window.controller_ready)
+        self.assertEqual(self.connect_count, 1)
+        self.assertFalse(self.serial.closed)
 
     def test_window_close_during_home_stops_workers(self):
         self.controller.z = self.controller.target_z = 1355

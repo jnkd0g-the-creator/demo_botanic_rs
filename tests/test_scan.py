@@ -8,7 +8,7 @@ from pathlib import Path
 from core.scan import Scan
 from core.settings import ROOT, Settings
 from hardware.controller import Busy, Cancelled
-from tests.fakes import BlockedCamera, FakeController, ImmediateCamera
+from tests.fakes import BlockedCamera, FakeController, FastController, ImmediateCamera, PositionOnlySerial
 
 
 class FastScan(Scan):
@@ -49,7 +49,10 @@ class ScanTests(unittest.TestCase):
                                     "XX_+45", ("photo", 135, 600), "Z_900",
                                     "XX_+45", ("photo", 180, 900), "Z_1200",
                                     "XX_+45", ("photo", 225, 1200), "Z_1355"])
-        self.assertEqual(self.events[-2:], ["STOP", "LED_OFF"])
+        self.assertEqual(self.events[-1], "STOP")
+        self.assertNotIn("LED_OFF", self.events)
+        self.assertEqual(self.controller.white_light, 100)
+        self.assertEqual(self.events[0], "HOME")
         self.assertEqual(len(list(Path(result.session_path).rglob("*.png"))), 10)
         self.assertEqual(self.manifest(result)["status"], "completed")
 
@@ -63,7 +66,8 @@ class ScanTests(unittest.TestCase):
                 result = self.scan().run(self.cancel)
                 self.assertEqual(result.reason, "stopped", result.error)
                 index = self.events.index(phase)
-                self.assertEqual(self.events[index + 1:], ["STOP", "LED_OFF"])
+                self.assertEqual(self.events[index + 1:], ["STOP"])
+                self.assertNotIn("LED_OFF", self.events)
                 self.assertEqual(self.manifest(result)["status"], "stopped")
 
     def test_stop_in_settle_delay_does_not_capture(self):
@@ -86,7 +90,7 @@ class ScanTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(results[0].reason, "stopped")
         self.camera.request.done.set()
-        self.assertEqual(self.events[-2:], ["STOP", "LED_OFF"])
+        self.assertEqual(self.events[-1], "STOP")
         self.assertFalse(any(isinstance(event, str) and event.startswith("Z_") for event in self.events))
 
     def test_timeout_of_stationary_axis_stops_without_taking_photo(self):
@@ -95,21 +99,22 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(result.reason, "error")
         self.assertIn("Не достигнута позиция X", result.error)
         self.assertEqual(result.pairs, 0)
-        self.assertEqual(self.events[-2:], ["STOP", "LED_OFF"])
+        self.assertEqual(self.events[-1], "STOP")
 
     def test_capture_timeout_stops_without_raising_cameras(self):
         self.camera = BlockedCamera()
         result = self.scan().run(self.cancel)
         self.assertEqual(result.reason, "error")
         self.assertIn("стереопары", result.error)
-        self.assertEqual(self.events[-2:], ["STOP", "LED_OFF"])
+        self.assertEqual(self.events[-1], "STOP")
         self.assertNotIn("Z_300", self.events)
 
     def test_cancelled_queued_start_never_sends_home(self):
         self.cancel.set()
         result = self.scan().run(self.cancel)
         self.assertEqual(result.reason, "stopped")
-        self.assertEqual(self.events, ["STOP", "LED_OFF"])
+        self.assertEqual(self.events, ["STOP"])
+        self.assertEqual(self.controller.white_light, 60)
         self.assertFalse(list(self.output.iterdir()))
 
     def test_wrap_at_360_and_repeat_start_from_bottom(self):
@@ -155,6 +160,30 @@ class ScanTests(unittest.TestCase):
         result = self.scan(abort_error=lambda: "Камеры отключены").run(self.cancel)
         self.assertEqual(result.reason, "error")
         self.assertEqual(self.manifest(result)["error"], "Камеры отключены")
+
+    def test_serial_without_command_ack_completes_entire_pass(self):
+        serial = PositionOnlySerial(self.controller)
+        self.controller = FastController("fake", 115200, serial_factory=lambda **_: serial)
+        self.settings = replace(self.settings, move_timeout_s=1, home_timeout_s=1)
+        result = self.scan().run(self.cancel)
+        self.assertEqual(result.reason, "completed", result.error)
+        self.assertEqual(result.pairs, 5)
+        self.assertEqual(result.position.z, 1355)
+        self.assertIn(b"SMLZ_1355\n", serial.writes)
+        self.assertEqual(serial.writes.count(b"XX_+45\n"), 5)
+        self.assertEqual([p["z_mm"] for p in self.manifest(result)["pairs"]], [0, 300, 600, 900, 1200])
+        self.assertEqual(serial.plant.white_light, 100)
+
+    def test_silent_serial_does_not_hide_a_missing_position_response(self):
+        serial = PositionOnlySerial(self.controller)
+        serial.drop_positions = 1
+        self.controller = FastController("fake", 115200, serial_factory=lambda **_: serial)
+        result = self.scan().run(self.cancel)
+        self.assertEqual(result.reason, "error")
+        self.assertIn("Нет ответа на POS", result.error)
+        self.assertEqual(result.pairs, 0)
+        self.assertEqual(serial.writes[-1], b"STOP\n")
+        self.assertNotIn(b"XX_+45\n", serial.writes)
 
 
 if __name__ == "__main__":

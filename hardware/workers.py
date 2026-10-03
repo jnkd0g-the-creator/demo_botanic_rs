@@ -12,7 +12,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from core.scan import Outcome, Scan
 from core.settings import ROOT, Settings
 from hardware.cameras import DahengPair
-from hardware.controller import Cancelled, Controller
+from hardware.controller import Busy, Cancelled, Controller
 
 log = logging.getLogger(__name__)
 
@@ -165,12 +165,14 @@ class RigWorker(QThread):
     def run(self):
         client = None
         next_poll = 0
+        position_failures = 0
         try:
             while not self.shutdown.is_set():
                 if client is None:
                     self._fail_pending("Потеряна связь с контроллером")
                     try:
                         client = self.connector(self.settings, self.shutdown)
+                        position_failures = 0
                         self.connection.emit(True, f"Контроллер · {client.port}")
                     except Cancelled:
                         break
@@ -191,27 +193,33 @@ class RigWorker(QThread):
                                 abort_error=lambda: job.error)
                     outcome = scan.run(job.cancel)
                     self.active_job = None
-                    if outcome.error:
-                        self.connection.emit(False, outcome.error)
-                        client.close()
-                        client = None
+                    # Ошибка камеры/записи/команды не означает потерю serial-связи.
+                    # Состояние порта проверит очередной POS без переоткрытия.
                     self.completed.emit(outcome)
+                    next_poll = 0
                 elif time.monotonic() >= next_poll:
                     try:
                         self.position.emit(client.position(self.shutdown))
+                        if position_failures:
+                            self.connection.emit(True, f"Контроллер · {client.port}")
+                        position_failures = 0
                     except Cancelled:
                         break
+                    except Busy:
+                        # HOME/STOP могут ещё отпускать busy. Сам порт доступен.
+                        pass
                     except Exception as exc:
+                        position_failures += 1
                         self.connection.emit(False, str(exc))
-                        client.close()
-                        client = None
+                        if position_failures >= 3:
+                            client.close()
+                            client = None
                     next_poll = time.monotonic() + 1
         finally:
             self._fail_pending("Приложение закрывается")
             if client:
                 try:
                     client.command("STOP")
-                    client.command("LED_OFF")
                 except Exception:
                     log.exception("Ошибка остановки при закрытии")
                 client.close()

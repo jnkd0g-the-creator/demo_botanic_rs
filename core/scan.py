@@ -89,15 +89,16 @@ class Scan:
                 raise Cancelled()
             session = Session(self.output)
             outcome.session_path = str(session.path)
-            self.status("Подготовка установки")
-            for text in (f"SMLZ_{self.settings.z_max_mm}", f"SPDZ_{self.settings.z_speed}",
-                         f"SPDX_{self.settings.x_speed}", f"ACLX_{self.settings.x_acceleration}",
-                         "LED_OFF", f"W_{self.settings.white_light}"):
-                self.command(text, cancel)
             self.status("Возврат камер вниз · HOME")
             self.command("HOME", cancel)
             self.pause(0.4, cancel)
             self.wait_position("z", 0, cancel, self.settings.home_timeout_s)
+            # Как в рабочем приложении: настройки осей применяются после HOME.
+            self.status("Подготовка установки")
+            for text in (f"SMLZ_{self.settings.z_max_mm}", f"SPDZ_{self.settings.z_speed}",
+                         f"SPDX_{self.settings.x_speed}", f"ACLX_{self.settings.x_acceleration}",
+                         f"W_{self.settings.white_light}"):
+                self.command(text, cancel)
 
             height = 0
             while height < self.settings.z_max_mm:
@@ -138,12 +139,11 @@ class Scan:
                 outcome.reason = "error"
                 outcome.error = "; ".join(filter(None, (outcome.error, self.abort_error())))
             self.status("Остановка установки")
-            for text in ("STOP", "LED_OFF"):
-                try:
-                    self.controller.command(text)
-                except Exception as exc:
-                    outcome.reason = "error"
-                    outcome.error = "; ".join(filter(None, (outcome.error, f"{text}: {exc}")))
+            try:
+                self.controller.command("STOP")
+            except Exception as exc:
+                outcome.reason = "error"
+                outcome.error = "; ".join(filter(None, (outcome.error, f"STOP: {exc}")))
             outcome.position = self.position
             if session:
                 try:

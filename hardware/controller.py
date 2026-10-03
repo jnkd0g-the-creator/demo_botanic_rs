@@ -40,6 +40,9 @@ def parse_position(lines: list[str]) -> Position:
 class Controller:
     """Единственный владелец serial — поток установки; никаких очередей движений."""
 
+    RESPONSE_TIMEOUT_S = 0.5
+    RESPONSE_QUIET_S = 0.08
+
     def __init__(self, port: str, baud: int, serial_factory=None):
         if serial_factory is None:
             import serial
@@ -51,13 +54,14 @@ class Controller:
         self.serial.close()
 
     def command(self, text: str, cancel: Event | None = None) -> list[str]:
+        """Настройки/движение могут не иметь ACK; запрос POS обязан вернуть координаты."""
         if cancel is not None and cancel.is_set():
             raise Cancelled()
         self.serial.reset_input_buffer()
         if cancel is not None and cancel.is_set():
             raise Cancelled()
         self.serial.write((text + "\n").encode("ascii"))
-        deadline = time.monotonic() + 0.5
+        deadline = time.monotonic() + self.RESPONSE_TIMEOUT_S
         quiet_until = deadline
         lines = []
         partial = b""
@@ -70,7 +74,17 @@ class Controller:
                     line = line.decode(errors="replace").strip()
                     if line:
                         lines.append(line)
-                quiet_until = time.monotonic() + 0.08
+                reply_complete = text != "POS" or any("ERR" in line.upper() for line in lines)
+                if not reply_complete:
+                    try:
+                        parse_position(lines)
+                        reply_complete = True
+                    except ControllerError:
+                        pass
+                # Эхо/OK может прийти раньше координат. Ждём именно ответ POS,
+                # а не заканчиваем запрос после первого произвольного сообщения.
+                if reply_complete:
+                    quiet_until = time.monotonic() + self.RESPONSE_QUIET_S
             # Ожидание ответа прерывается; следующий serial write будет STOP.
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
@@ -81,8 +95,10 @@ class Controller:
                 if "BUSY" in line.upper():
                     raise Busy(line)
                 raise ControllerError(f"{text}: {line}")
-        if not lines:
+        if not lines and text == "POS":
             raise ControllerError(f"Нет ответа на {text} ({self.port})")
+        # Прошивка установки не обязана подтверждать SMLZ/SPD/HOME/XX/Z/STOP/W.
+        # При этом явные ERR выше остаются ошибками, а движение проверяется по POS.
         return lines
 
     def position(self, cancel: Event | None = None) -> Position:

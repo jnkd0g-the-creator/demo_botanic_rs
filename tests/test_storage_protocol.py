@@ -13,6 +13,7 @@ from core.pea_cloud import make_pea_cloud
 from core.session import Session
 from core.settings import ROOT, load_settings
 from hardware.controller import Busy, Cancelled, Controller, ControllerError, Position, parse_position
+from tests.fakes import FastController
 
 
 class StorageTests(unittest.TestCase):
@@ -113,6 +114,35 @@ class ProtocolTests(unittest.TestCase):
             self.client([b"ERR:BUSY\n"]).command("HOME")
         with self.assertRaises(ControllerError):
             self.client([b"ERR:LIMIT\n"]).command("Z_1400")
+
+    def test_control_commands_accept_empty_reply_but_pos_still_requires_coordinates(self):
+        serial = FakeSerial([])
+        client = FastController("fake", 115200, serial_factory=lambda **_: serial)
+        for command in ("SMLZ_1355", "SPDZ_40", "SPDX_45", "ACLX_13", "HOME",
+                        "XX_+45", "Z_300", "W_100", "STOP"):
+            with self.subTest(command=command):
+                self.assertEqual(client.command(command), [])
+        with self.assertRaisesRegex(ControllerError, "Нет ответа на POS"):
+            client.position()
+
+    def test_position_waits_past_ack_for_delayed_coordinates(self):
+        client = self.client([])
+        client.RESPONSE_TIMEOUT_S = 0.2
+        client.RESPONSE_QUIET_S = 0.01
+        start = time.monotonic()
+        sent_ack = sent_position = False
+        def received():
+            nonlocal sent_ack, sent_position
+            if not sent_ack:
+                sent_ack = True
+                return b"OK\n"
+            if not sent_position and time.monotonic() - start > 0.04:
+                sent_position = True
+                return b"POS Z=600 X=135\n"
+            time.sleep(0.001)
+            return b""
+        self.serial.readline = received
+        self.assertEqual(client.position(), Position(135, 600))
 
     def test_stop_event_prevents_serial_motion_write(self):
         cancel = threading.Event()
