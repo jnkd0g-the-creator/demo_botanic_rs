@@ -163,11 +163,49 @@ class UiFlowTests(unittest.TestCase):
         self.assertTrue(self.window.controller_ready)
 
     def test_one_missed_position_poll_recovers_without_reopening_port(self):
+        connections, positions = [], []
+        self.window.rig.connection.connect(lambda ready, _: connections.append(ready))
+        self.window.rig.position.connect(positions.append)
+        polls = self.serial.writes.count(b"POS\n")
         self.serial.drop_positions = 1
-        self.wait(lambda: not self.window.controller_ready)
-        self.wait(lambda: self.window.controller_ready)
+        self.wait(lambda: self.serial.writes.count(b"POS\n") >= polls + 2 and positions)
+        self.assertNotIn(False, connections)
+        self.assertTrue(self.window.controller_ready)
         self.assertEqual(self.connect_count, 1)
         self.assertFalse(self.serial.closed)
+
+    def test_ack_after_preparation_shows_completed_report_with_five_pairs(self):
+        self.controller.z = self.controller.target_z = 173
+        def reply_ok(text):
+            if text == "W_100":
+                self.serial.position_replies.append([b"OK\n"])
+        self.controller.on_command = reply_ok
+        self.window.start_button.click()
+        self.wait(self.report_visible)
+        self.assertFalse(self.window.report.error_label.text())
+        self.assertEqual(len(list(self.output.rglob("*.png"))), 10)
+        manifest = json.loads(next(self.output.rglob("session.json")).read_text())
+        self.assertEqual(manifest["status"], "completed")
+        self.assertEqual(len(manifest["pairs"]), 5)
+        preparation = self.serial.writes.index(b"W_100\n")
+        self.assertEqual(self.serial.writes[preparation + 1:preparation + 4],
+                         [b"POS\n", b"POS\n", b"XX_+45\n"])
+        self.assertEqual(self.connect_count, 1)
+
+    def test_stop_while_preparation_waits_for_coordinates_opens_stopped_report(self):
+        def reply_ok(text):
+            if text == "W_100":
+                self.client.POSITION_RESPONSE_TIMEOUT_S = 2
+                self.serial.position_replies.extend([[b"OK\n"]] * 3)
+        self.controller.on_command = reply_ok
+        self.window.start_button.click()
+        self.wait(lambda: b"W_100\n" in self.serial.writes and len(self.serial.position_replies) == 2)
+        self.window.stop_button.click()
+        self.wait(self.report_visible, timeout=1)
+        self.assertIn("Остановлено пользователем", self.window.report.session_summary.text())
+        self.assertFalse(self.window.report.error_label.text())
+        self.assertNotIn("XX_+45", self.controller.events)
+        self.assertFalse(list(self.output.rglob("*.png")))
 
     def test_window_close_during_home_stops_workers(self):
         self.controller.z = self.controller.target_z = 1355

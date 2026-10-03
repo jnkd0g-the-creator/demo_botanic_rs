@@ -53,8 +53,10 @@ class Scan:
                     raise TimeoutError(f"Контроллер занят: {text}")
                 self.pause(self.settings.poll_s, cancel)
 
-    def read_position(self, cancel):
-        pos = self.controller.position(cancel)
+    def read_position(self, cancel, deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + self.settings.move_timeout_s
+        pos = self.controller.position(cancel, deadline=deadline)
         if not (-2 <= pos.z <= self.settings.z_max_mm + 2):
             raise RuntimeError(f"Координата Z вне диапазона: {pos.z:.1f} мм")
         self.position = pos
@@ -66,11 +68,13 @@ class Scan:
         stable = 0
         previous = None
         while time.monotonic() < deadline:
-            self.pause(self.settings.poll_s, cancel)
+            self.pause(min(self.settings.poll_s, max(0, deadline - time.monotonic())), cancel)
             try:
-                pos = self.read_position(cancel)
+                pos = self.read_position(cancel, deadline)
             except Busy:
                 continue
+            except TimeoutError:
+                break
             value = getattr(pos, axis)
             distance = abs(value - target) if axis == "z" else abs((value - target + 180) % 360 - 180)
             stationary = previous is not None and abs(value - previous) < 0.15

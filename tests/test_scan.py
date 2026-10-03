@@ -177,15 +177,68 @@ class ScanTests(unittest.TestCase):
 
     def test_silent_serial_does_not_hide_a_missing_position_response(self):
         serial = PositionOnlySerial(self.controller)
-        serial.drop_positions = 1
+        serial.drop_positions = 3
         self.controller = FastController("fake", 115200, serial_factory=lambda **_: serial)
         self.addCleanup(self.controller.close)
+        self.settings = replace(self.settings, home_timeout_s=1)
         result = self.scan().run(self.cancel)
         self.assertEqual(result.reason, "error")
         self.assertIn("Нет ответа на POS", result.error)
         self.assertEqual(result.pairs, 0)
         self.assertEqual(serial.writes[-1], b"STOP\n")
         self.assertNotIn(b"XX_+45\n", serial.writes)
+        self.assertEqual(serial.writes.count(b"POS\n"), 3)
+
+    def test_home_from_173_then_ack_only_after_preparation_recovers_to_complete_scan(self):
+        plant = self.controller
+        plant.z = plant.target_z = 173
+        serial = PositionOnlySerial(plant)
+        def reply_ok_after_preparation(text):
+            if text == "W_100":
+                serial.position_replies.append([b"OK\n"])
+        plant.on_command = reply_ok_after_preparation
+        self.controller = FastController("fake", 115200, serial_factory=lambda **_: serial)
+        self.addCleanup(self.controller.close)
+        self.settings = replace(self.settings, move_timeout_s=1, home_timeout_s=1)
+        result = self.scan().run(self.cancel)
+        self.assertEqual(result.reason, "completed", result.error)
+        self.assertEqual(result.pairs, 5)
+        self.assertEqual(result.position.z, 1355)
+        self.assertEqual(plant.events.count("HOME"), 1)
+        self.assertEqual(plant.events.count("XX_+45"), 5)
+        preparation = serial.writes.index(b"W_100\n")
+        self.assertEqual(serial.writes[preparation + 1:preparation + 4],
+                         [b"POS\n", b"POS\n", b"XX_+45\n"])
+        self.assertEqual([p["z_mm"] for p in self.manifest(result)["pairs"]], [0, 300, 600, 900, 1200])
+        self.assertEqual(len(list(Path(result.session_path).rglob("*.png"))), 10)
+
+    def test_persistent_ack_only_stops_before_rotation_or_photo_using_old_coordinates(self):
+        for phase in ("preparation", "before_photo"):
+            with self.subTest(phase=phase):
+                plant = FakeController()
+                serial = PositionOnlySerial(plant)
+                self.controller = FastController("fake", 115200, serial_factory=lambda **_: serial)
+                self.addCleanup(self.controller.close)
+                self.settings = replace(self.settings, move_timeout_s=1, home_timeout_s=1)
+                def no_coordinates():
+                    serial.position_replies.extend([[b"OK\n"]] * 3)
+                def command(text):
+                    if phase == "preparation" and text == "W_100":
+                        no_coordinates()
+                def status(text):
+                    if phase == "before_photo" and text == "Стабилизация перед снимком":
+                        no_coordinates()
+                plant.on_command = command
+                result = self.scan(status=status).run(threading.Event())
+                self.assertEqual(result.reason, "error")
+                self.assertIn("после 3 попыток", result.error)
+                self.assertIn("OK", result.error)
+                self.assertEqual(result.pairs, 0)
+                self.assertEqual(plant.events.count("XX_+45"), int(phase == "before_photo"))
+                self.assertNotIn("Z_300", plant.events)
+                self.assertEqual(serial.writes[-1], b"STOP\n")
+                self.assertEqual(self.manifest(result)["status"], "error")
+                self.controller.close()
 
 
 if __name__ == "__main__":

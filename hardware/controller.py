@@ -26,6 +26,10 @@ class TransportError(ControllerError):
     pass
 
 
+class PositionUnavailable(ControllerError):
+    """Ответ получен без полных координат либо не пришёл в срок; POS можно повторить."""
+
+
 @dataclass(frozen=True)
 class Position:
     x: float
@@ -47,6 +51,8 @@ class Controller:
 
     RESPONSE_TIMEOUT_S = 0.6
     RESPONSE_QUIET_S = 0.08
+    POSITION_RESPONSE_TIMEOUT_S = 2.0
+    POSITION_ATTEMPTS = 3
     POSITION_INTERVAL_S = 1.5
     POSITION_SEND_TIMEOUT_S = 5.0
     STOP_SEND_TIMEOUT_S = 2.0
@@ -109,15 +115,17 @@ class Controller:
                     self._read_error = exc
                     self._received.notify_all()
 
-    def _check(self, text, cancel):
+    def _check(self, text, cancel, deadline=math.inf):
         if cancel is not None and cancel.is_set():
             raise Cancelled()
         if self._closed.is_set():
             raise TransportError(f"{text} ({self.port}): serial-порт закрыт")
         if self._read_error is not None and text != "STOP":
             raise TransportError(f"{text} ({self.port}): чтение: {self._read_error}")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{text} ({self.port}): истекло время ожидания")
 
-    def _send(self, text, cancel):
+    def _send(self, text, cancel, deadline=math.inf):
         """write + flush могут блокироваться в драйвере; отмену обслуживает вызывающий поток."""
         done, abort = Event(), Event()
         errors = []
@@ -160,13 +168,13 @@ class Controller:
         writer.start()
         timeout = (self.STOP_SEND_TIMEOUT_S if text == "STOP" else
                    self.POSITION_SEND_TIMEOUT_S if text == "POS" else None)
-        deadline = time.monotonic() + timeout if timeout is not None else math.inf
+        send_deadline = time.monotonic() + timeout if timeout is not None else math.inf
         try:
             while not done.wait(0.02):
-                self._check(text, cancel)
-                if time.monotonic() >= deadline:
+                self._check(text, cancel, deadline)
+                if time.monotonic() >= send_deadline:
                     raise TransportError(f"{text} ({self.port}): {phase} не завершена за {timeout:g} с")
-        except (Cancelled, TransportError):
+        except (Cancelled, TransportError, TimeoutError):
             abort.set()
             self._resync = True
             try:
@@ -188,36 +196,37 @@ class Controller:
             self._resync = True
             raise TransportError(f"{text} ({self.port}): {phase}: {errors[0]}") from errors[0]
         self._resync = False
-        self._check(text, cancel)
+        self._check(text, cancel, deadline)
 
-    def command(self, text: str, cancel: Event | None = None) -> list[str]:
+    def command(self, text: str, cancel: Event | None = None, *, deadline=math.inf) -> list[str]:
         """Настройки/движение могут не иметь ACK; запрос POS обязан вернуть координаты."""
         while not self._command_lock.acquire(timeout=0.02):
-            self._check(text, cancel)
+            self._check(text, cancel, deadline)
         try:
-            self._check(text, cancel)
+            self._check(text, cancel, deadline)
             if text == "POS":
                 # Единый лимит для подключения, ожидания движения и фонового опроса.
                 # Каждый вызов ждёт новый ответ; старые координаты не кэшируются.
                 while time.monotonic() < self._next_position:
-                    self._check(text, cancel)
+                    self._check(text, cancel, deadline)
                     self._closed.wait(min(0.02, self._next_position - time.monotonic()))
-                self._check(text, cancel)
+                self._check(text, cancel, deadline)
             since = time.monotonic()
             try:
-                self._send(text, cancel)
+                self._send(text, cancel, deadline)
             finally:
                 if text == "POS":
                     self._next_position = time.monotonic() + self.POSITION_INTERVAL_S
-            return self._response(text, since, cancel)
+            return self._response(text, since, cancel, deadline)
         finally:
             self._command_lock.release()
 
-    def _response(self, text, since, cancel):
-        deadline = time.monotonic() + self.RESPONSE_TIMEOUT_S
+    def _response(self, text, since, cancel, deadline=math.inf):
+        timeout = self.POSITION_RESPONSE_TIMEOUT_S if text == "POS" else self.RESPONSE_TIMEOUT_S
+        response_deadline = min(deadline, time.monotonic() + timeout)
         with self._received:
             while True:
-                self._check(text, cancel)
+                self._check(text, cancel, deadline)
                 received = [(at, line) for start, at, line in self._lines if start >= since]
                 lines = [line for _, line in received]
                 for line in lines:
@@ -231,22 +240,30 @@ class Controller:
                         complete = True
                     except ControllerError:
                         pass
-                until = min(deadline, received[-1][0] + self.RESPONSE_QUIET_S) if complete else deadline
+                until = (min(response_deadline, received[-1][0] + self.RESPONSE_QUIET_S)
+                         if complete else response_deadline)
                 remaining = until - time.monotonic()
                 if remaining <= 0:
                     break
                 self._received.wait(min(0.02, remaining))
         if text == "POS":
             if not lines:
-                raise ControllerError(f"Нет ответа на POS ({self.port})")
+                raise PositionUnavailable(f"Нет ответа на POS ({self.port})")
             try:
                 parse_position(lines)
             except ControllerError as exc:
-                raise ControllerError(f"POS ({self.port}): {exc}") from exc
+                raise PositionUnavailable(f"POS ({self.port}): {exc}") from exc
         return lines
 
-    def position(self, cancel: Event | None = None) -> Position:
-        return parse_position(self.command("POS", cancel))
+    def position(self, cancel: Event | None = None, *, deadline=math.inf) -> Position:
+        for attempt in range(1, self.POSITION_ATTEMPTS + 1):
+            try:
+                return parse_position(self.command("POS", cancel, deadline=deadline))
+            except PositionUnavailable as exc:
+                # Повторяется только запрос координат. ERR, ошибки транспорта,
+                # отмена и общий таймаут операции сразу передаются вызывающему коду.
+                if attempt == self.POSITION_ATTEMPTS:
+                    raise PositionUnavailable(f"Не получены координаты после {attempt} попыток. {exc}") from exc
 
     @classmethod
     def connect(cls, settings: Settings, shutdown: Event):

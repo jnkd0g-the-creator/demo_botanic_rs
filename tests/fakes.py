@@ -39,7 +39,7 @@ class FakeController:
         self.on_command(text)
         return ["OK"]
 
-    def position(self, cancel=None):
+    def position(self, cancel=None, *, deadline=None):
         if cancel is not None and cancel.is_set():
             raise Cancelled()
         if self.frozen != "x":
@@ -56,6 +56,7 @@ class FastController(Controller):
     """Производственный парсер/транспорт с короткими таймаутами для эмулятора."""
 
     RESPONSE_TIMEOUT_S = 0.03
+    POSITION_RESPONSE_TIMEOUT_S = 0.03
     RESPONSE_QUIET_S = 0.003
     POSITION_INTERVAL_S = 0.005
 
@@ -72,6 +73,7 @@ class PositionOnlySerial:
         self.output_resets = 0
         self.closed = False
         self.drop_positions = 0
+        self.position_replies = deque()
 
     def reset_input_buffer(self):
         raise AssertionError("Входящие данные нельзя сбрасывать между командами")
@@ -85,7 +87,9 @@ class PositionOnlySerial:
         if not command:
             return len(data)
         if command == "POS":
-            if self.drop_positions:
+            if self.position_replies:
+                self.responses.extend(self.position_replies.popleft())
+            elif self.drop_positions:
                 self.drop_positions -= 1
             else:
                 pos = self.plant.position()

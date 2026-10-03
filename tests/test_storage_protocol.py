@@ -122,17 +122,17 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ControllerError, "Нет ответа на POS"):
             client.position()
 
-    def test_position_waits_past_ack_for_delayed_coordinates(self):
+    def test_position_waits_past_old_600_ms_timeout_for_delayed_coordinates(self):
         client = self.client([])
-        client.RESPONSE_TIMEOUT_S = 0.2
         client.RESPONSE_QUIET_S = 0.01
         def reply():
             self.serial.responses.append(b"OK\n")
-            timer = threading.Timer(0.04, self.serial.responses.append, args=(b"POS Z=600 X=135\n",))
+            timer = threading.Timer(0.8, self.serial.responses.append, args=(b"POS Z=600 X=135\n",))
             self.addCleanup(timer.join)
             timer.start()
         self.serial.on_write = reply
         self.assertEqual(client.position(), Position(135, 600))
+        self.assertEqual(self.serial.writes, [b"POS\n"])
 
     def test_stop_event_prevents_serial_motion_write(self):
         cancel = threading.Event()

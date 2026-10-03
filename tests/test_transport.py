@@ -4,7 +4,7 @@ import threading
 import time
 import unittest
 
-from hardware.controller import Cancelled, Controller, ControllerError, Position, TransportError
+from hardware.controller import Busy, Cancelled, Controller, ControllerError, Position, PositionUnavailable, TransportError
 from tests.fakes import BlockedSerial, FastController, PositionOnlySerial
 
 
@@ -75,15 +75,18 @@ class TransportTests(unittest.TestCase):
         serial.release.set()
         thread.join(1)
         self.assertEqual(errors, [])
-        serial.drop_positions = 1
+        serial.drop_positions = 3
         with self.assertRaisesRegex(ControllerError, "Нет ответа на POS"):
             client.position()
+        self.assertEqual(serial.writes.count(b"POS\n"), 3)
         self.assertEqual(client.position(), Position(0, 0))
 
     def test_all_position_calls_share_1500_ms_limit_and_return_fresh_data(self):
         client, serial = self.client(cls=Controller)
         client.RESPONSE_TIMEOUT_S = 0.03
+        client.POSITION_RESPONSE_TIMEOUT_S = 0.03
         client.RESPONSE_QUIET_S = 0.003
+        serial.position_replies.append([b"OK\n"])
         self.assertEqual(client.position(), Position(0, 0))
         client.command("HOME")
         serial.plant.z = serial.plant.target_z = 300
@@ -91,8 +94,88 @@ class TransportTests(unittest.TestCase):
         serial.plant.z = serial.plant.target_z = 600
         self.assertEqual(client.position(), Position(0, 600))
         times = [at for data, at in zip(serial.writes, serial.write_times) if data == b"POS\n"]
-        self.assertEqual(len(times), 3)
+        self.assertEqual(len(times), 4)
         self.assertTrue(all(b - a >= 1.5 for a, b in zip(times, times[1:])))
+
+    def test_missing_and_ack_only_replies_recover_with_fresh_coordinates_on_third_attempt(self):
+        client, serial = self.client()
+        serial.position_replies.extend([[], [b"OK\n"]])
+        serial.plant.x = serial.plant.target_x = 135
+        serial.plant.z = serial.plant.target_z = 600
+        self.assertEqual(client.position(), Position(135, 600))
+        self.assertEqual(serial.writes, [b"POS\n"] * 3)
+        self.assertFalse(serial.closed)
+
+    def test_three_missing_or_incomplete_position_replies_are_a_visible_error(self):
+        for reply in ([], [b"OK\n"], [b"POS X=135\n"]):
+            with self.subTest(reply=reply):
+                client, serial = self.client()
+                serial.position_replies.extend([reply] * 3)
+                with self.assertRaisesRegex(PositionUnavailable, "после 3 попыток") as result:
+                    client.position()
+                self.assertIn("test-vcp", str(result.exception))
+                self.assertEqual(serial.writes, [b"POS\n"] * 3)
+                client.close()
+
+    def test_explicit_position_errors_and_transport_failures_are_not_retried(self):
+        for reply, error in ((b"ERR:BUSY\n", Busy), (b"ERR:LIMIT\n", ControllerError)):
+            with self.subTest(reply=reply):
+                client, serial = self.client()
+                serial.position_replies.append([reply])
+                with self.assertRaises(error):
+                    client.position()
+                self.assertEqual(serial.writes, [b"POS\n"])
+                client.close()
+
+        client, serial = self.client()
+        writes = []
+
+        def failed(data):
+            writes.append(data)
+            raise OSError("USB disconnected")
+
+        serial.write = failed
+        with self.assertRaisesRegex(TransportError, "USB disconnected"):
+            client.position()
+        self.assertEqual(writes, [b"POS\n"])
+
+    def test_stop_interrupts_ack_wait_and_gap_before_position_retry(self):
+        for response_timeout in (2.0, 0.03):
+            with self.subTest(response_timeout=response_timeout):
+                client, serial = self.client(BlockedSerial())
+                client.POSITION_RESPONSE_TIMEOUT_S = response_timeout
+                client.POSITION_INTERVAL_S = 1.5
+                serial.position_replies.append([b"OK\n"])
+                cancel = threading.Event()
+                serial.on_write = lambda data: self.delayed(0.08, cancel.set) if data == b"POS\n" else None
+                started = time.monotonic()
+                with self.assertRaises(Cancelled):
+                    client.position(cancel)
+                client.command("STOP")
+                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertEqual(serial.writes, [b"POS\n", b"STOP\n"])
+                client.close()
+
+    def test_position_recovery_respects_deadline_in_send_response_and_retry_gap(self):
+        for phase in ("send", "response", "retry_gap"):
+            with self.subTest(phase=phase):
+                client, serial = self.client(BlockedSerial())
+                client.POSITION_RESPONSE_TIMEOUT_S = 0.03 if phase == "retry_gap" else 2
+                client.POSITION_INTERVAL_S = 1.5
+                serial.position_replies.append([b"OK\n"])
+                if phase == "send":
+                    serial.block_command = "POS"
+                started = time.monotonic()
+                with self.assertRaisesRegex(TimeoutError, "POS .*истекло время"):
+                    client.position(deadline=started + 0.08)
+                client.command("STOP")
+                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertEqual(serial.writes[-1].strip(), b"STOP")
+                if phase == "send":
+                    self.assertTrue(serial.write_cancelled.is_set())
+                else:
+                    self.assertEqual(serial.writes.count(b"POS\n"), 1)
+                client.close()
 
     def test_cancel_during_position_rate_limit_does_not_delay_stop(self):
         client, serial = self.client()
