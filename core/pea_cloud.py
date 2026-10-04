@@ -28,6 +28,7 @@ class _Plant:
         self.points, self.colors, self.organs = [], [], []
         self.counts = dict(nodes=12, leaflets=0, stipules=0, tendrils=0, pods=0, flowers=0)
         self.leaf_area = 0.0
+        self.pod_lengths, self.pod_widths = [], []
 
     def add(self, points, organ, brightness=None):
         points = np.asarray(points).reshape(-1, 3)
@@ -99,6 +100,8 @@ class _Plant:
         radii = (6.5 + 0.85 * np.sin(t * np.pi * 12)) * np.sin(np.pi * t) ** 0.55 + 0.25
         self.tube(path, radii, 4, sides=16, flatten=0.65)
         self.counts["pods"] += 1
+        self.pod_lengths.append(float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum()))
+        self.pod_widths.append(float(2 * radii.max()))
 
     def petal(self, center, radial, radii, count=370):
         normal = self.rng.normal(size=(count, 3))
@@ -120,6 +123,7 @@ class _Plant:
         stem = self.stem(t)
         self.tube(stem, 3.0 - 1.8 * t, sides=14)
         stem_length = float(np.linalg.norm(np.diff(stem, axis=0), axis=1).sum())
+        productive_nodes = []
         for i, level in enumerate(np.linspace(0.105, 0.91, self.counts["nodes"])):
             base = self.stem(level)
             angle = i * 2.39996 + 0.25 * np.sin(i)
@@ -143,6 +147,7 @@ class _Plant:
                 direction = radial * 0.75 + side * sign * 0.5 + [0, 0, 0.65]
                 self.tendril(branch[-1], direction, (88 if sign else 115) * size)
             if 3 <= i <= 7:
+                productive_nodes.append((i + 1, float(base[2])))
                 for j in range(1 if i == 7 else 2):
                     anchor = branch[48 + j * 16]
                     stalk_end = anchor + side * (14 if j else -14) + [0, 0, -20]
@@ -158,9 +163,20 @@ class _Plant:
         organs = np.concatenate(self.organs)
         metrics = {**self.counts, "height_cm": round(float(points[:, 2].max()) / 10, 1),
                    "stem_length_cm": round(stem_length / 10, 1),
+                   "leaf_type": "Обычный (листочковый)",
+                   "development_type": "Индетерминантный",
+                   "development_stage": "Цветение и формирование бобов",
                    "leaf_area_cm2": round(float(self.leaf_area) / 100, 1),
+                   "flower_color": "Светло-фиолетовая",
+                   "pod_length_cm": round(float(np.mean(self.pod_lengths)) / 10, 1),
+                   "pod_width_cm": round(float(np.mean(self.pod_widths)) / 10, 1),
+                   "pod_size": "Средний",
+                   "pod_tip_shape": "Заострённая",
+                   "pod_curvature": "Слабая",
+                   "internodes_to_first_pod": productive_nodes[0][0],
+                   "first_productive_node_height_cm": round(productive_nodes[0][1] / 10, 1),
                    "lower_pod_height_cm": round(float(points[organs == 4, 2].min()) / 10, 1),
-                   "productive_nodes": 5,
+                   "productive_nodes": len(productive_nodes),
                    "seeds": 54, "grain_mass_g": 12.6}
         return PeaCloud(points, np.concatenate(self.colors), organs, metrics)
 

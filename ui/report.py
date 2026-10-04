@@ -57,46 +57,48 @@ class Report(QWidget):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(305)
-        scroll.setMaximumWidth(430)
+        scroll.setMinimumWidth(410)
+        scroll.setMaximumWidth(620)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         contents = QWidget()
         details = QVBoxLayout(contents)
         details.setContentsMargins(0, 0, 3, 0)
         details.setSpacing(12)
         details.addWidget(label("ДЕМОНСТРАЦИОННЫЕ ПОКАЗАТЕЛИ", "cardTitle"))
+        traits, layout = card()
+        layout.setContentsMargins(14, 12, 14, 12)
         grid = QGridLayout()
-        grid.setSpacing(9)
-        entries = (("ВЫСОТА", f"{metrics['height_cm']:.1f}", "см"),
-                   ("ДЛИНА СТЕБЛЯ", f"{metrics['stem_length_cm']:.1f}", "см"),
-                   ("УЗЛЫ", metrics["nodes"], "шт."),
-                   ("БОБЫ", metrics["pods"], "шт."),
-                   ("ЛИСТОЧКИ", metrics["leaflets"], "шт."),
-                   ("ЦВЕТКИ", metrics["flowers"], "шт."))
-        for index, (name, value, unit) in enumerate(entries):
-            tile, layout = card(name)
-            layout.setContentsMargins(12, 11, 12, 11)
-            value_row = QHBoxLayout()
-            value_row.addWidget(label(str(value).replace(".", ","), "metric"))
-            value_row.addWidget(label(unit, "subtitle"), alignment=Qt.AlignmentFlag.AlignBottom)
-            value_row.addStretch()
-            layout.addLayout(value_row)
-            grid.addWidget(tile, index // 2, index % 2)
-        details.addLayout(grid)
-        morphology, layout = card("МОРФОЛОГИЯ И ПРОДУКТИВНОСТЬ")
-        for name, value in (("Прилистники", f"{metrics['stipules']} шт."),
-                            ("Усики", f"{metrics['tendrils']} шт."),
-                            ("Площадь листьев", f"{metrics['leaf_area_cm2']:.1f} см²"),
-                            ("Продуктивные узлы", f"{metrics['productive_nodes']} шт."),
-                            ("Нижний боб", f"{metrics['lower_pod_height_cm']:.1f} см"),
-                            ("Семена", f"{metrics['seeds']} шт."),
-                            ("Масса зерна", f"{metrics['grain_mass_g']:.1f} г")):
-            item = QHBoxLayout()
-            item.addWidget(label(name, "subtitle"))
-            item.addStretch()
-            item.addWidget(label(re.sub(r"(?<=\d)\.(?=\d)", ",", value)))
-            layout.addLayout(item)
-        details.addWidget(morphology)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(0, 3)
+        grid.setColumnStretch(1, 2)
+        entries = (("Длина главного стебля", f"{metrics['stem_length_cm']:.1f} см"),
+                   ("Высота растения", f"{metrics['height_cm']:.1f} см"),
+                   ("Количество узлов", f"{metrics['nodes']} шт."),
+                   ("Тип листового аппарата", metrics["leaf_type"]),
+                   ("Тип развития", metrics["development_type"]),
+                   ("Фаза развития", metrics["development_stage"]),
+                   ("Площадь листовой поверхности", f"{metrics['leaf_area_cm2']:.1f} см²"),
+                   ("Окраска цветка", metrics["flower_color"]),
+                   ("Количество цветков", f"{metrics['flowers']} шт."),
+                   ("Количество бобов", f"{metrics['pods']} шт."),
+                   ("Длина боба", f"{metrics['pod_length_cm']:.1f} см"),
+                   ("Ширина боба", f"{metrics['pod_width_cm']:.1f} см"),
+                   ("Размер боба", metrics["pod_size"]),
+                   ("Форма верхушки боба", metrics["pod_tip_shape"]),
+                   ("Изогнутость боба", metrics["pod_curvature"]),
+                   ("Количество междоузлий до первого боба", f"{metrics['internodes_to_first_pod']} шт."),
+                   ("Высота первого продуктивного узла", f"{metrics['first_productive_node_height_cm']:.1f} см"),
+                   ("Количество продуктивных узлов", f"{metrics['productive_nodes']} шт."))
+        for index, (name, value) in enumerate(entries):
+            name_label = label(name, "subtitle", wrap=True)
+            value_label = label(re.sub(r"(?<=\d)\.(?=\d)", ",", value), "traitValue", wrap=True)
+            name_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            grid.addWidget(name_label, index, 0)
+            grid.addWidget(value_label, index, 1)
+        layout.addLayout(grid)
+        details.addWidget(traits)
         session, layout = card("СЕАНС СЪЁМКИ")
         self.session_summary = label("", "subtitle", wrap=True)
         layout.addWidget(self.session_summary)

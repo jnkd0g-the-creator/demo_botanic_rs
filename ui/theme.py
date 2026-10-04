@@ -18,6 +18,7 @@ QLabel#chip, QLabel#chipAccent, QLabel#demoBadge {
 QLabel#chipAccent { background: #172B45; border-color: #315789; color: #A8CBFF; }
 QLabel#demoBadge { background: #332A19; border-color: #68512B; color: #FFCB75; }
 QLabel#metric { font-size: 29px; font-weight: bold; color: #E6EDF5; }
+QLabel#traitValue { font-size: 13px; font-weight: bold; }
 QLabel#statusLabel { font-size: 15px; font-weight: bold; }
 QLabel#error { color: #FF8A8D; font-size: 12px; }
 QPushButton {
